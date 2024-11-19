@@ -3,6 +3,7 @@ import shutil
 import zipfile
 import logging
 from main import load_model_and_predict
+from config import CHECKPOINT_DIR
 
 # Configure logging
 logging.basicConfig(
@@ -55,7 +56,7 @@ logging.info(os.listdir(mask_dir))"""
 try:
     load_model_and_predict(
         rgb_path=rgb_dir,
-        checkpoint_path=r'C:\Harshi\ecs-venv\rgb-to-hyper\rgb-to-hyper-main\rgb-to-hyper\checkpoints'
+        checkpoint_path=r"/workspaces/rgb-to-hyper/rgb_micro"
     )
 except Exception as e:
     logging.error(f"An error occurred during prediction: {str(e)}")

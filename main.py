@@ -6,7 +6,7 @@ import tensorflow as tf
 import imageio
 import logging
 import tifffile
-from config import IMG_HEIGHT, IMG_WIDTH, RGB_IMAGE_PATH,HSI_IMAGE_PATH
+from config import IMG_HEIGHT, IMG_WIDTH, RGB_IMAGE_PATH,HSI_IMAGE_PATH, RGB_MICRO_PATH
 from model import Generator, Discriminator
 from loss import peak_signal_to_noise_ratio, spectral_angle_mapper, generator_loss, mean_squared_error, discriminator_loss
 from utils import load_paired_images, visualize_generated_images, apply_paired_augmentation, load_rgb_images, save_hsi_image
@@ -329,7 +329,7 @@ def load_model_and_predict(rgb_path: str, checkpoint_path: str):
 if __name__ == "__main__":
     mode = "global"
     if mode == "predict":
-        load_model_and_predict(rgb_path=RGB_IMAGE_PATH, checkpoint_path=config.CHECKPOINT_DIR)
+        load_model_and_predict(rgb_path=RGB_MICRO_PATH, checkpoint_path=config.CHECKPOINT_DIR)
     else:
         generator = Generator()
         discriminator = Discriminator()
