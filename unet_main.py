@@ -17,7 +17,7 @@ logging.basicConfig(
 
 # Define paths using raw strings
 extract_dir = r"C:\Harshi\ECS-II\Dataset\extracted"
-rgb_dir = r"C:\Harshi\ECS-II\Dataset\rgb_micro"
+rgb_dir = r"/workspaces/rgb-to-hyper/rgb_micro"
 mask_dir = r"C:\Harshi\ECS-II\Dataset\mask_micro"
 zip_file_path = r"C:\Harshi\ECS-II\Dataset\images.zip"
 
@@ -56,7 +56,7 @@ logging.info(os.listdir(mask_dir))"""
 try:
     load_model_and_predict(
         rgb_path=rgb_dir,
-        checkpoint_path=r"/workspaces/rgb-to-hyper/rgb_micro"
+        checkpoint_path=r"/workspaces/rgb-to-hyper/checkpoints"
     )
 except Exception as e:
     logging.error(f"An error occurred during prediction: {str(e)}")
