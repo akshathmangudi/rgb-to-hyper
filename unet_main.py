@@ -7,7 +7,9 @@ from PIL import Image
 import numpy as np
 import tifffile as tiff
 from config import CHECKPOINT_DIR
-from unet_utils import load_model_and_predict, load_data, visualize_overlay, display_mask, preprocess_image, create_synthetic_mask, visualize_overlay, visualize_synthetic_overlay
+from matplotlib import pyplot as plt
+from main import load_model_and_predict
+from unet_utils import load_data, visualize_overlay, display_mask, preprocess_image, create_synthetic_mask, visualize_overlay, visualize_synthetic_overlay
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping # type: ignore
@@ -15,11 +17,11 @@ from unet_model import build_unet, HSIGenerator  # Import from the new module
 from utils import load_rgb_images
 from utils import (
     visualize_all_hsi_bands, 
-    #create_hsi_grid_image,
+    create_hsi_grid_image,
     visualize_stacked_hsi,
-    #visualize_false_color_composite,
-    #visualize_pca_composite,
-    #visualize_pca_3d
+    visualize_false_color_composite,
+    visualize_pca_composite,
+    visualize_pca_3d
 )
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppresses INFO and WARNING messages
@@ -46,13 +48,13 @@ logging.basicConfig(
     ]
 )
 
-"""
+
 # Define paths using raw strings
 extract_dir = r"C:\Harshi\ECS-II\Dataset\extracted"
 rgb_dir = r"C:\Harshi\ECS-II\Dataset\temp-rgb-micro"
 mask_dir = r"C:\Harshi\ECS-II\Dataset\mask_micro"
 zip_file_path = r"C:\Harshi\ECS-II\Dataset\dataverse_files full"
-"""
+
 
 """
 # Extract the zip file
@@ -86,7 +88,7 @@ logging.info(os.listdir(rgb_dir))
 logging.info("Contents of 'mask_micro':")
 logging.info(os.listdir(mask_dir))
 """
-"""
+
 # Call load_model_and_predict with the sorted images
 try:
     load_model_and_predict(
@@ -96,11 +98,22 @@ try:
 except Exception as e:
     logging.error(f"An error occurred during prediction: {str(e)}")
 
+# Load the saved multi-band TIFF
+loaded_hsi = tiff.imread(r'c:\Harshi\ECS-II\Dataset\gen_hsi\190_hsi.tiff')
+
+print(f"Loaded HSI Shape: {loaded_hsi.shape}")  # Should be (height, width, 31)
+
+# Visualize the first spectral band
+plt.imshow(loaded_hsi[:, :, 0], cmap='gray')
+plt.title('HSI Channel 1')
+plt.axis('off')
+plt.show()
+
 # Visualization of all HSI bands and stacking
 try:
     # Visualize all bands
     hsi_data = visualize_all_hsi_bands(
-        filepath=r"C:\Harshi\ECS-II\Dataset\gen_hsi\186_hsi.tiff",  # Use the specific TIFF file
+        filepath=r"C:\Harshi\ECS-II\Dataset\gen_hsi\027_hsi.tiff",  # Use the specific TIFF file
         bands=None,              # Set to None to visualize all bands
         figsize=(25, 20)         # Adjust figsize as needed
     )
@@ -108,7 +121,7 @@ try:
     if hsi_data.size != 0:
         # Stack bands into a single 3D NumPy array
         stacked_hsi = hsi_data  # hsi_data is already a 3D array (height, width, bands)
-        logging.info(f"HSI data stacked with shape: {stacked_hsi.shape}")
+        logging.info(f"HSI data loaded with shape: {stacked_hsi.shape}")
         
         # Save the stacked HSI data as a multi-band TIFF
         output_stacked_path = r"C:\Harshi\ECS-II\Dataset\gen_hsi\stacked_hsi.tiff"
@@ -130,18 +143,18 @@ try:
         except Exception as e:
             logging.error(f"An error occurred during grid image creation: {e}")
         
-        # False-Color Composite Visualization
+        """# False-Color Composite Visualization
         try:
             false_color_save_path = r"C:\Harshi\ECS-II\Dataset\gen_hsi\False_Color_Composite.png"
             visualize_false_color_composite(
                 stacked_hsi=stacked_hsi,
-                bands=[29, 19, 9],  # Example band indices for RGB channels
+                bands=[19, 29, 9],  # Example band indices for RGB channels
                 figsize=(10, 10),
                 save_path=false_color_save_path
             )
         except Exception as e:
             logging.error(f"An error occurred during False-Color Composite visualization: {e}")
-        
+        """
         # PCA Composite Visualization
         try:
             pca_save_path = r"C:\Harshi\ECS-II\Dataset\gen_hsi\PCA_Composite.png"
@@ -154,7 +167,7 @@ try:
         except Exception as e:
             logging.error(f"An error occurred during PCA Composite visualization: {e}")
         
-        # Interactive 3D PCA Visualization (Optional)
+        """# Interactive 3D PCA Visualization (Optional)
         try:
             visualize_pca_3d(
                 stacked_hsi=stacked_hsi,
@@ -167,16 +180,16 @@ try:
         try:
             visualize_stacked_hsi(stacked_hsi, save_path=r"C:\Harshi\ECS-II\Dataset\gen_hsi\stacked_hsi.tiff")
         except Exception as e:
-            logging.error(f"An error occurred during stacked HSI visualization: {str(e)}")
+            logging.error(f"An error occurred during stacked HSI visualization: {str(e)}")"""
     
     else:
         logging.error("HSI data is empty. Stacking and visualization skipped.")
 
 except Exception as e:
     logging.error(f"An error occurred during HSI bands visualization and stacking: {str(e)}")
-"""
 
-def test_generator(generator):
+
+"""def test_generator(generator):
     X_test, Y_test = generator.__getitem__(0)
     print(f"Test Batch - X shape: {X_test.shape}, Y shape: {Y_test.shape}")
     
@@ -202,7 +215,7 @@ def test_generator(generator):
     plt.show()
 
 if __name__ == "__main__":
-    """IMG_HEIGHT, IMG_WIDTH = 256, 256
+    IMG_HEIGHT, IMG_WIDTH = 256, 256
     N_CLASSES = 1  # Binary segmentation
     BATCH_SIZE = 16
     EPOCHS = 5
@@ -253,7 +266,7 @@ if __name__ == "__main__":
     # Test the generator
     test_generator(train_generator)
 
-    # Optional: Validation generator
+    # Validation generator
     val_generator = HSIGenerator(
         img_dir=IMG_PATH,
         mask_dir=MASK_PATH,
@@ -285,9 +298,7 @@ if __name__ == "__main__":
 
     print("Training complete!")"""
 
-    # unet_main.py
-
-from unet_utils import load_model_and_predict
+"""from unet_utils import load_model_and_predict
 
 if __name__ == "__main__":
     IMAGE_PATH = r"C:\Harshi\ECS-II\Dataset\val_set_micro_hsi\035_hsi.tiff"
@@ -300,7 +311,7 @@ if __name__ == "__main__":
 
     OUTPUT_PATH = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
     
-    """try:
+    try:
         # Predict the mask and visualize the overlay
         mask = load_model_and_predict(IMAGE_PATH, CHECKPOINT_PATH, OUTPUT_PATH)
         if mask is not None:
@@ -309,10 +320,12 @@ if __name__ == "__main__":
             logging.error("Mask prediction failed. Overlay was not created.")
     except Exception as e:
         logging.error(f"Failed to load model and predict: {e}")"""
-    
+
+"""
     try:
         # Create and visualize synthetic mask overlay
         visualize_synthetic_overlay(IMAGE_PATH, OUTPUT_PATH)
         logging.info("Synthetic mask overlay created successfully.")
     except Exception as e:
         logging.error(f"Failed to create synthetic mask overlay: {e}")
+"""
