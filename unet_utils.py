@@ -91,7 +91,7 @@ def load_data(img_dir: str, mask_dir: str, img_height: int = 256, img_width: int
             try:
                 # Load and preprocess the HSI image (31 channels)
                 img = tiff.imread(img_path)  # Shape: (Bands, Height, Width)
-                # img = img.transpose(1, 2, 0)  # Convert to (Height, Width, Bands)
+                img = img.transpose(1, 0, 2)  # Convert to (Height, Width, Bands)
                 img = tf.image.resize(img, [img_height, img_width]).numpy()
                 img = img / np.max(img)  # Normalize based on max value
                 X.append(img)
@@ -138,22 +138,25 @@ def load_model(checkpoint_path: str) -> tf.keras.Model:
     try:
         model = tf.keras.models.load_model(checkpoint_path)
         logging.info(f"Model loaded from: {checkpoint_path}")
+        return model
+    except FileNotFoundError:
+        logging.error(f"Checkpoint file not found at: {checkpoint_path}")
+        raise
+    except tf.errors.NotFoundError:
+        logging.error(f"Model architecture not found in checkpoint: {checkpoint_path}")
+        raise
     except Exception as e:
-        logging.error(f"Error loading model from {checkpoint_path}: {e}")
-        raise FileNotFoundError("Checkpoint not found.")
-    return model
+        logging.error(f"Unexpected error loading model from {checkpoint_path}: {e}")
+        raise
 
-# unet_utils.py
-
-import tifffile as tiff
-
-def preprocess_image(image_path: str, target_size=(256, 256)) -> np.ndarray:
+def preprocess_image(image_path: str, target_size=(256, 256), expected_bands: int = 31) -> np.ndarray:
     """
     Load and preprocess the HSI image.
 
     Args:
         image_path (str): Path to the HSI image.
         target_size (tuple): Desired image size.
+        expected_bands (int): Number of expected spectral bands.
 
     Returns:
         np.ndarray: Preprocessed image array.
@@ -161,19 +164,40 @@ def preprocess_image(image_path: str, target_size=(256, 256)) -> np.ndarray:
     try:
         # Read the multi-band TIFF image
         img = tiff.imread(image_path)  # Shape: (Bands, Height, Width) or (Height, Width, Bands)
+        logging.info(f"Original image shape: {img.shape}")
         
         # Check the shape and transpose if necessary
-        if img.ndim == 3 and img.shape[0] == 31:
-            # If shape is (Bands, Height, Width), transpose to (Height, Width, Bands)
-            img = img.transpose(1, 2, 0)
-            logging.info(f"Image transposed to shape: {img.shape}")
-        elif img.ndim == 3 and img.shape[2] != 31:
-            logging.warning(f"Expected 31 channels, but got {img.shape[2]} channels.")
+        if img.ndim == 3:
+            if img.shape[0] == expected_bands:
+                # Assume shape is (Bands, Height, Width), transpose to (Height, Width, Bands)
+                img = img.transpose(1, 2, 0)
+                logging.info(f"Image transposed to shape: {img.shape}")
+            elif img.shape[2] == expected_bands:
+                # Already in (Height, Width, Bands)
+                logging.info(f"Image already in (Height, Width, Bands) with shape: {img.shape}")
+            else:
+                logging.warning(
+                    f"Image has {img.shape[2] if img.shape[2] >= img.shape[0] else img.shape[0]} bands, "
+                    f"expected {expected_bands}. Truncating or padding as necessary."
+                )
+                if img.shape[2] < expected_bands:
+                    # Pad with zeros
+                    padding = expected_bands - img.shape[2]
+                    pad_width = ((0, 0), (0, 0), (0, padding))
+                    img = np.pad(img, pad_width, mode='constant', constant_values=0)
+                    logging.info(f"Image padded to shape: {img.shape}")
+                else:
+                    # Truncate bands
+                    img = img[:, :, :expected_bands]
+                    logging.info(f"Image truncated to shape: {img.shape}")
+        else:
+            logging.error(f"Unsupported image dimensions: {img.ndim}D. Expected 3D array.")
+            raise ValueError("Image must be a 3D array.")
         
         # Convert to float32 if not already
         if img.dtype != np.float32:
             img = img.astype(np.float32)
-            logging.info(f"Image dtype converted to float32.")
+            logging.info("Converted image to float32.")
         
         # Resize the image to the target size
         img = tf.image.resize(img, target_size).numpy()
@@ -182,10 +206,10 @@ def preprocess_image(image_path: str, target_size=(256, 256)) -> np.ndarray:
         # Normalize the image based on the max value in the image
         max_val = np.max(img)
         if max_val > 0:
-            img /= max_val
-            logging.info(f"Image normalized by max value: {max_val}")
+            img = img / max_val
+            logging.info("Image normalized by max value.")
         else:
-            logging.warning("Max value of the image is 0. Skipping normalization.")
+            logging.warning("Max value of image is 0. Skipping normalization.")
         
         # Add a batch dimension
         img = np.expand_dims(img, axis=0)  # Shape: (1, Height, Width, Bands)
@@ -198,7 +222,7 @@ def preprocess_image(image_path: str, target_size=(256, 256)) -> np.ndarray:
         raise e
     
 
-def predict_mask(model: tf.keras.Model, image: np.ndarray, output_dir: str) -> np.ndarray:
+def predict_mask(model: tf.keras.Model, image: np.ndarray, output_dir: str, apply_sigmoid: bool = False) -> np.ndarray:
     """
     Predict the segmentation mask using the U-Net model.
 
@@ -206,40 +230,59 @@ def predict_mask(model: tf.keras.Model, image: np.ndarray, output_dir: str) -> n
         model (tf.keras.Model): Loaded U-Net model.
         image (np.ndarray): Preprocessed image array.
         output_dir (str): Directory to save the mask images.
+        apply_sigmoid (bool): Whether to apply sigmoid activation to the predictions.
 
     Returns:
         np.ndarray: Predicted binary mask.
     """
     try:
+        # Ensure the output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
         prediction = model.predict(image)
         logging.info(f"Prediction shape: {prediction.shape}")
 
+        # Handle activation
+        if apply_sigmoid:
+            prediction = tf.keras.activations.sigmoid(prediction).numpy()
+            logging.info("Applied sigmoid activation to predictions.")
+        elif prediction.max() > 1.0:
+            logging.warning("Prediction values exceed 1.0 but sigmoid activation was not applied.")
+
+        # Assuming binary segmentation; handle single channel
+        if prediction.shape[-1] == 1:
+            raw_pred = prediction[0, :, :, 0]  # Shape: (Height, Width)
+        else:
+            # If multiple classes, consider using argmax or other strategies
+            raw_pred = np.argmax(prediction, axis=-1)[0]
+            logging.info("Applied argmax to multi-channel predictions.")
+
         # Save raw prediction
-        raw_pred = prediction[0, :, :, 0]  # Shape: (256, 256)
         plt.figure(figsize=(6, 6))
         plt.imshow(raw_pred, cmap='viridis')
         plt.colorbar()
-        raw_pred_path = os.path.join(output_dir, "raw_prediction.png")
         plt.title("Raw Model Prediction")
+        raw_pred_path = os.path.join(output_dir, "raw_prediction.png")
         plt.savefig(raw_pred_path)
         plt.close()
         logging.info(f"Raw prediction saved to {raw_pred_path}")
 
-        # Apply sigmoid activation if not already applied
-        if prediction.max() > 1.0:
-            prediction = tf.keras.activations.sigmoid(prediction).numpy()
-            logging.info("Applied sigmoid activation to predictions.")
-
-        # Binarize the mask using a threshold of 0.5
-        mask = (prediction > 0.5).astype(np.uint8)
-        logging.info("Binarized the mask with threshold 0.5.")
+        # Binarize the mask using a threshold of 0.5 (only relevant if sigmoid was applied)
+        if apply_sigmoid or prediction.max() > 1.0:
+            mask = (prediction > 0.5).astype(np.uint8)
+            logging.info("Binarized the mask with threshold 0.5.")
+        else:
+            # If already binary, ensure it's in uint8
+            mask = prediction.astype(np.uint8)
+            logging.info("Converted prediction to uint8 mask.")
 
         # Remove unnecessary dimensions
         mask = np.squeeze(mask)
         logging.info(f"Mask shape after squeezing: {mask.shape}")
 
         # Log mask statistics
-        logging.info(f"Mask Statistics - Min: {mask.min()}, Max: {mask.max()}, Unique Values: {np.unique(mask)}")
+        unique_values = np.unique(mask)
+        logging.info(f"Mask Statistics - Min: {mask.min()}, Max: {mask.max()}, Unique Values: {unique_values}")
 
         # Save the mask as an image for inspection
         mask_uint8 = (mask * 255).astype(np.uint8)
@@ -254,7 +297,7 @@ def predict_mask(model: tf.keras.Model, image: np.ndarray, output_dir: str) -> n
         raise e
 
 
-def overlay_mask(image_path: str, mask: np.ndarray, output_path: str):
+def overlay_mask(image_path: str, mask: np.ndarray, output_path: str, alpha: float = 0.5):
     """
     Overlay the predicted mask on the original HSI image converted to grayscale.
 
@@ -262,6 +305,7 @@ def overlay_mask(image_path: str, mask: np.ndarray, output_path: str):
         image_path (str): Path to the original HSI image.
         mask (np.ndarray): Predicted binary mask.
         output_path (str): Path to save the overlaid image.
+        alpha (float): Transparency factor for the mask overlay.
 
     Returns:
         None
@@ -286,7 +330,7 @@ def overlay_mask(image_path: str, mask: np.ndarray, output_path: str):
         img_rgb = img.convert("RGB")
         
         # Blend the grayscale RGB image with the colored mask
-        overlay = Image.blend(img_rgb, mask_rgb, alpha=0.5)
+        overlay = Image.blend(img_rgb, mask_rgb, alpha=alpha)
         
         overlay.save(output_path)
         logging.info(f"Overlay image saved to: {output_path}")
@@ -314,17 +358,24 @@ def visualize_segmentation(image_path: str, mask: np.ndarray, output_path: str):
 
         # Transpose if necessary to get (Height, Width, Bands)
         if hsi.ndim == 3 and hsi.shape[0] == 31:
-            hsi = hsi.transpose(1, 2, 0)  # Now shape is (Height, Width, Bands)
+            hsi = hsi.transpose(1, 2, 0)
             logging.info(f"HSI image transposed to shape: {hsi.shape}")
+        elif hsi.ndim == 3 and hsi.shape[2] != 31:
+            logging.warning(f"Expected 31 bands, but found {hsi.shape[2]} bands.")
+            hsi = hsi[:, :, :31]
+            logging.info(f"HSI image truncated to shape: {hsi.shape}")
+        else:
+            logging.info(f"HSI image already in (Height, Width, Bands) format with shape: {hsi.shape}")
 
         # Apply PCA to convert HSI to RGB
         rgb_image = hsi_to_rgb_pca(hsi)  # Shape: (Height, Width, 3)
         logging.info(f"PCA-based RGB image shape: {rgb_image.shape}")
 
         # Normalize RGB image for display
-        rgb_image_normalized = rgb_image.copy()
-        rgb_image_normalized -= rgb_image_normalized.min()
-        rgb_image_normalized /= rgb_image_normalized.max()
+        rgb_min = rgb_image.min()
+        rgb_max = rgb_image.max()
+        rgb_image_normalized = (rgb_image - rgb_min) / (rgb_max - rgb_min) if rgb_max > rgb_min else rgb_image
+        logging.info(f"RGB image normalized to range [0, 1].")
 
         # Create a figure with three subplots
         plt.figure(figsize=(18, 6))
@@ -349,23 +400,24 @@ def visualize_segmentation(image_path: str, mask: np.ndarray, output_path: str):
         colored_mask = np.zeros_like(rgb_image_normalized)
         colored_mask[..., 0] = mask  # Assign mask to the Red channel
         
-        # Normalize mask for visualization
-        mask_normalized = mask / mask.max()
-
+        # Normalize mask for visualization to prevent division by zero
+        mask_max = mask.max()
+        mask_normalized = mask / mask_max if mask_max > 0 else mask
+        
         plt.imshow(colored_mask, cmap='Reds', alpha=0.5)
         plt.title('Overlay')
         plt.axis('off')
 
         plt.tight_layout()
-        plt.savefig(output_path, bbox_inches='tight', pad_inches=0)
-        plt.show()
-        logging.info(f"Segmentation visualization saved to: {output_path}")
+        plt.savefig(output_path)
+        plt.close()
+        logging.info(f"Segmentation visualization saved to {output_path}")
 
     except Exception as e:
         logging.error(f"Error in visualize_segmentation: {e}")
         raise e
 
-def visualize_overlay(hsi_path: str, mask: np.ndarray, output_path: str):
+def visualize_overlay(hsi_path: str, mask: np.ndarray, output_path: str, alpha: float = 0.5):
     """
     Visualize and save the overlay of the predicted mask on the HSI image in grayscale with red highlights.
 
@@ -373,105 +425,64 @@ def visualize_overlay(hsi_path: str, mask: np.ndarray, output_path: str):
         hsi_path (str): Path to the original HSI image.
         mask (np.ndarray): Predicted binary mask with shape (Height, Width).
         output_path (str): Path to save the overlaid image.
+        alpha (float): Transparency factor for the mask overlay.
 
     Returns:
         None
     """
     try:
-        # Load the HSI image
-        hsi = tiff.imread(hsi_path)
-        logging.info(f"Loaded HSI image from {hsi_path} with shape {hsi.shape} and dtype {hsi.dtype}")
+        # Load the HSI image using tifffile
+        hsi = tiff.imread(hsi_path)  # Shape: (Bands, Height, Width) or (Height, Width, Bands)
+        logging.info(f"Loaded HSI image shape: {hsi.shape}, dtype: {hsi.dtype}")
 
-        # Ensure HSI has shape (Height, Width, Bands)
-        if hsi.ndim != 3 or hsi.shape[2] != 31:
-            raise ValueError(f"HSI image has invalid shape {hsi.shape}. Expected shape (Height, Width, 31).")
+        # Transpose if necessary to get (Height, Width, Bands)
+        if hsi.ndim == 3 and hsi.shape[0] == 31:
+            hsi = hsi.transpose(1, 2, 0)
+            logging.info(f"HSI image transposed to shape: {hsi.shape}")
+        elif hsi.ndim == 3 and hsi.shape[2] != 31:
+            logging.warning(f"Expected 31 bands, but found {hsi.shape[2]} bands.")
+            hsi = hsi[:, :, :31]
+            logging.info(f"HSI image truncated to shape: {hsi.shape}")
+        else:
+            logging.info(f"HSI image already in (Height, Width, Bands) format with shape: {hsi.shape}")
 
-        # Convert HSI to grayscale by averaging across spectral bands
-        grayscale_image = np.mean(hsi, axis=2)
-        logging.info(f"Converted HSI to grayscale with shape {grayscale_image.shape}")
-
-        # Normalize the grayscale image to [0, 1] for visualization
-        grayscale_min = grayscale_image.min()
-        grayscale_max = grayscale_image.max()
-        if grayscale_max - grayscale_min == 0:
-            raise ValueError("Cannot normalize image with zero dynamic range.")
-        grayscale_normalized = (grayscale_image - grayscale_min) / (grayscale_max - grayscale_min)
-        logging.info("Normalized grayscale image to [0, 1] range.")
-
-        # Ensure mask is binary
-        if mask.max() > 1:
-            mask = (mask > 0.5).astype(np.uint8)
-            logging.info("Converted mask to binary.")
-
-        # Resize mask if it doesn't match the grayscale image dimensions
-        if mask.shape != grayscale_normalized.shape:
-            mask = cv2.resize(mask, (grayscale_normalized.shape[1], grayscale_normalized.shape[0]), interpolation=cv2.INTER_NEAREST)
-            logging.info(f"Resized mask to match grayscale image dimensions: {mask.shape}")
-
-        # Log mask statistics
-        logging.info(f"Mask Statistics - Min: {mask.min()}, Max: {mask.max()}, Unique Values: {np.unique(mask)}")
-
-        # Verify dimensions
-        assert mask.shape == grayscale_normalized.shape, "Mask and grayscale image dimensions do not match."
-
-        # Normalize the grayscale image to [0, 1] for visualization
-        grayscale_min = grayscale_image.min()
-        grayscale_max = grayscale_image.max()
-        if grayscale_max - grayscale_min == 0:
-            raise ValueError("Cannot normalize image with zero dynamic range.")
-        grayscale_normalized = (grayscale_image - grayscale_min) / (grayscale_max - grayscale_min)
-        logging.info("Normalized grayscale image to [0, 1] range.")
-
-        # Ensure mask is binary
-        if mask.max() > 1:
-            mask = (mask > 0.5).astype(np.uint8)
-            logging.info("Converted mask to binary.")
-
-        # Resize mask if it doesn't match the grayscale image dimensions
-        if mask.shape != grayscale_normalized.shape:
-            mask = cv2.resize(mask, (grayscale_normalized.shape[1], grayscale_normalized.shape[0]), interpolation=cv2.INTER_NEAREST)
-            logging.info(f"Resized mask to match grayscale image dimensions: {mask.shape}")
-
-        # Debug: Check mask statistics
-        logging.info(f"Mask statistics - min: {mask.min()}, max: {mask.max()}, unique values: {np.unique(mask)}")
+        # Convert HSI to Grayscale using PCA (could be replaced with simple averaging)
+        rgb_image = hsi_to_rgb_pca(hsi)  # Shape: (Height, Width, 3)
+        hsi_grayscale = rgb_image.mean(axis=2)
+        hsi_grayscale = (hsi_grayscale - hsi_grayscale.min()) / (
+            hsi_grayscale.max() - hsi_grayscale.min()) if hsi_grayscale.max() > hsi_grayscale.min() else hsi_grayscale
+        hsi_grayscale = (hsi_grayscale * 255).astype(np.uint8)
+        hsi_image = Image.fromarray(hsi_grayscale, mode='L')
+        hsi_image = hsi_image.resize((mask.shape[1], mask.shape[0]))
+        logging.info(f"Grayscale HSI image resized to: {hsi_image.size}")
 
         # Create a red mask
-        red_mask = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.float32)
-        red_mask[:, :, 0] = mask  # Red channel
-
-        # Convert grayscale to RGB
-        grayscale_rgb = np.stack([grayscale_normalized]*3, axis=2)
-
-        # Define alpha for blending
-        alpha = 0.5  # Adjust this value as needed (0.0 transparent, 1.0 opaque)
-
-        # Blend the grayscale RGB image with the red mask
-        overlay = grayscale_rgb.copy()
-        overlay[mask == 1] = (1 - alpha) * grayscale_rgb[mask == 1] + alpha * red_mask[mask == 1]
-
-        logging.info("Applied red mask overlay on grayscale RGB image.")
-
-        # Convert overlay to uint8
-        overlay_uint8 = (overlay * 255).astype(np.uint8)
-
-        # Save the overlay image using PIL
-        overlay_image = Image.fromarray(overlay_uint8)
-        overlay_image.save(output_path)
-        logging.info(f"Overlay visualization saved to {output_path}")
+        mask_red = Image.new("RGB", hsi_image.size, (0, 0, 0))
+        mask_pixels = mask_red.load()
+        for i in range(mask_red.size[0]):
+            for j in range(mask_red.size[1]):
+                if mask[j, i]:  # Assuming mask is in (Height, Width) format
+                    mask_pixels[i, j] = (255, 0, 0)  # Red
+                
+        # Blend the grayscale image with the red mask
+        overlay = Image.blend(hsi_image.convert("RGB"), mask_red, alpha=alpha)
+        overlay.save(output_path)
+        logging.info(f"Overlay visualization saved to: {output_path}")
 
     except Exception as e:
-        logging.error(f"Error in visualize_overlay: {e}", exc_info=True)
+        logging.error(f"Error in visualize_overlay: {e}")
         raise e
     
     
-def load_model_and_predict(image_path: str, checkpoint_path: str, output_path: str) -> np.ndarray:
+def load_model_and_predict(image_path: str, checkpoint_path: str, output_dir: str, overlay_filename: str = "overlay.png") -> np.ndarray:
     """
     Load the model, predict the mask for a single image, visualize, and save the overlay.
 
     Args:
         image_path (str): Path to the input HSI image.
         checkpoint_path (str): Path to the saved model.
-        output_path (str): Path to save the overlay image.
+        output_dir (str): Directory to save the prediction results.
+        overlay_filename (str): Filename for the overlay image.
 
     Returns:
         np.ndarray: Predicted binary mask.
@@ -479,25 +490,39 @@ def load_model_and_predict(image_path: str, checkpoint_path: str, output_path: s
     try:
         # Load the model
         model = load_model(checkpoint_path)
+        logging.info("Model loaded successfully.")
 
         # Preprocess the image
-        image = preprocess_image(image_path)
-        logging.info(f"Image loaded and preprocessed: {image_path}")
+        preprocessed_image = preprocess_image(image_path)
+        logging.info("Image preprocessed successfully.")
 
         # Predict the mask
-        mask = predict_mask(model, image, os.path.dirname(output_path))
-        logging.info("Mask prediction completed.")
+        mask = predict_mask(
+            model=model,
+            image=preprocessed_image,
+            output_dir=output_dir,
+            apply_sigmoid=True  # Assuming binary segmentation with sigmoid activation
+        )
+        logging.info("Mask predicted successfully.")
 
-        # Visualize the overlay with red highlights
-        visualize_overlay(image_path, mask, output_path)
-        logging.info(f"Overlay saved to: {output_path}")
+        # Define overlay path
+        overlay_path = os.path.join(output_dir, overlay_filename)
 
-        return mask  # Return the mask for further use if needed
+        # Overlay the mask on the original image
+        overlay_mask(
+            image_path=image_path,
+            mask=mask,
+            output_path=overlay_path,
+            alpha=0.5  # Semi-transparent
+        )
+        logging.info(f"Overlay created and saved to {overlay_path}.")
 
+        return mask
     except Exception as e:
-        logging.error(f"Error in load_model_and_predict: {e}")
-        return None
-    
+        logging.error(f"Failed to load model and predict: {e}")
+        raise e
+
+
 def hsi_to_rgb_pca(hsi_image: np.ndarray, n_components: int = 3) -> np.ndarray:
     """
     Convert HSI image to RGB using PCA.
@@ -510,18 +535,41 @@ def hsi_to_rgb_pca(hsi_image: np.ndarray, n_components: int = 3) -> np.ndarray:
         np.ndarray: RGB image array with shape (Height, Width, 3).
     """
     try:
+        if hsi_image.ndim != 3:
+            logging.error(f"HSI image must be 3D. Received shape: {hsi_image.shape}")
+            raise ValueError("HSI image must be a 3D array.")
+
+        # Ensure data is float32
+        if hsi_image.dtype != np.float32:
+            hsi_image = hsi_image.astype(np.float32)
+            logging.info("Converted HSI image to float32 for PCA.")
+
+        # Reshape HSI image to 2D array for PCA
         height, width, bands = hsi_image.shape
-        hsi_reshaped = hsi_image.reshape(-1, bands)  # Shape: (Height*Width, Bands)
-        
+        reshaped_hsi = hsi_image.reshape(-1, bands)
+        logging.info(f"HSI image reshaped for PCA: {reshaped_hsi.shape}")
+
+        # Normalize the data (mean=0, variance=1)
+        reshaped_hsi -= reshaped_hsi.mean(axis=0)
+        reshaped_hsi /= reshaped_hsi.std(axis=0) + 1e-8  # Avoid division by zero
+        logging.info("HSI data normalized for PCA.")
+
+        # Apply PCA
         pca = PCA(n_components=n_components)
-        rgb_flat = pca.fit_transform(hsi_reshaped)
-        
-        # Normalize PCA output to [0, 1]
-        rgb_flat -= rgb_flat.min()
-        rgb_flat /= rgb_flat.max()
-        
-        rgb_image = rgb_flat.reshape(height, width, n_components)
-        return rgb_image
+        pca_result = pca.fit_transform(reshaped_hsi)
+        logging.info(f"PCA result shape: {pca_result.shape}")
+
+        # Reshape back to image dimensions
+        rgb_image = pca_result.reshape(height, width, n_components)
+        logging.info(f"RGB image shape after PCA reshape: {rgb_image.shape}")
+
+        # Normalize RGB image to [0,1]
+        rgb_min = rgb_image.min()
+        rgb_max = rgb_image.max()
+        rgb_image_normalized = (rgb_image - rgb_min) / (rgb_max - rgb_min) if rgb_max > rgb_min else rgb_image
+        logging.info("RGB image normalized to [0, 1].")
+
+        return rgb_image_normalized
 
     except Exception as e:
         logging.error(f"Error converting HSI to RGB using PCA: {e}")
@@ -543,86 +591,53 @@ def display_mask(mask: np.ndarray):
     plt.axis('off')
     plt.show()
 
-def create_synthetic_mask(height: int, width: int) -> np.ndarray:
+
+def create_synthetic_mask(height: int, width: int, top_left: tuple = (50, 50), bottom_right: tuple = (200, 200), value: int = 1) -> np.ndarray:
     """
-    Create a synthetic binary mask with a white rectangle.
+    Create a synthetic binary mask with a filled rectangle.
 
     Args:
         height (int): Height of the mask.
         width (int): Width of the mask.
+        top_left (tuple): Top-left corner of the rectangle.
+        bottom_right (tuple): Bottom-right corner of the rectangle.
+        value (int): Fill value for the rectangle.
 
     Returns:
         np.ndarray: Synthetic binary mask.
     """
     mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.rectangle(mask, (50, 50), (200, 200), 1, -1)  # White rectangle
+    cv2.rectangle(mask, top_left, bottom_right, value, -1)  # Filled rectangle
+    logging.info(f"Synthetic mask created with rectangle from {top_left} to {bottom_right}.")
     return mask
 
 
-def visualize_synthetic_overlay(image_path: str, output_path: str) -> None:
+def visualize_synthetic_overlay(image_path: str, output_path: str, mask_alpha: float = 0.3):
     """
-    Create and overlay a synthetic mask on the grayscale image.
+    Create and overlay a synthetic mask on the HSI image.
 
     Args:
         image_path (str): Path to the input HSI image.
         output_path (str): Path to save the overlaid image.
+        mask_alpha (float): Transparency factor for the synthetic mask.
 
     Returns:
         None
     """
     try:
-        # Load HSI image
-        hsi = tiff.imread(image_path)
-        logging.info(f"Loaded HSI image from {image_path} with shape {hsi.shape} and dtype {hsi.dtype}")
-
-        # Ensure HSI has shape (Height, Width, Bands)
-        if hsi.ndim != 3 or hsi.shape[2] != 31:
-            raise ValueError(f"HSI image has invalid shape {hsi.shape}. Expected shape (Height, Width, 31).")
-
-        # Convert HSI to grayscale by averaging across spectral bands
-        grayscale_image = np.mean(hsi, axis=2)
-        logging.info(f"Converted HSI to grayscale with shape {grayscale_image.shape}")
-
-        # Normalize the grayscale image to [0, 1] for visualization
-        grayscale_min = grayscale_image.min()
-        grayscale_max = grayscale_image.max()
-        if grayscale_max - grayscale_min == 0:
-            raise ValueError("Cannot normalize image with zero dynamic range.")
-        grayscale_normalized = (grayscale_image - grayscale_min) / (grayscale_max - grayscale_min)
-        logging.info("Normalized grayscale image to [0, 1] range.")
-
         # Create synthetic mask
-        synthetic_mask = create_synthetic_mask(grayscale_image.shape[0], grayscale_image.shape[1])
-        logging.info("Synthetic mask created.")
+        synthetic_mask = create_synthetic_mask(height=256, width=256, top_left=(50, 50), bottom_right=(200, 200), value=1)
+        logging.info(f"Synthetic mask created with shape: {synthetic_mask.shape}")
 
-        # Log mask statistics
-        logging.info(f"Synthetic Mask Statistics - Min: {synthetic_mask.min()}, Max: {synthetic_mask.max()}, Unique Values: {np.unique(synthetic_mask)}")
-
-        # Create a red mask
-        red_channel = synthetic_mask.astype(np.float32)  # Red channel
-        red_mask = np.zeros((synthetic_mask.shape[0], synthetic_mask.shape[1], 3), dtype=np.float32)
-        red_mask[:, :, 0] = red_channel  # Red channel
-        logging.info("Created red mask.")
-
-        # Convert grayscale to RGB
-        grayscale_rgb = np.stack([grayscale_normalized]*3, axis=2)
-        logging.info("Converted grayscale image to RGB.")
-
-        # Define alpha for blending
-        alpha = 0.5  # Adjust this value as needed (0.0 transparent, 1.0 opaque)
-
-        # Blend the grayscale RGB image with the red mask
-        overlay = np.copy(grayscale_rgb)
-        overlay[synthetic_mask == 1] = (1 - alpha) * grayscale_rgb[synthetic_mask == 1] + alpha * red_mask[synthetic_mask == 1]
-        logging.info("Blended red mask with grayscale RGB image.")
-
-        # Convert overlay to uint8
-        overlay_uint8 = (overlay * 255).astype(np.uint8)
-
-        # Save the overlay image using PIL
-        overlay_image = Image.fromarray(overlay_uint8)
-        overlay_image.save(output_path)
-        logging.info(f"Synthetic overlay visualization saved to {output_path}")
+        # Overlay the synthetic mask on the image
+        overlay_mask(
+            image_path=image_path,
+            mask=synthetic_mask,
+            output_path=output_path,
+            alpha=mask_alpha
+        )
+        logging.info(f"Synthetic mask overlay saved to: {output_path}")
 
     except Exception as e:
-        logging.error(f"Error in visualize_synthetic_overlay: {e}")
+        logging.error(f"Failed to create synthetic mask overlay: {e}")
+        raise e
