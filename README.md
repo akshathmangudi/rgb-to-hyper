@@ -3,6 +3,8 @@ This is the end-to-end implementation of detecting microplastics in water using 
 
 ## Workflow
 
+This project employs a GAN and U-Net in a novel approach to microplastic detection. The GAN acts as a translator, generating hyperspectral images from RGB inputs, overcoming the limitations of RGB data. Subsequently, the U-Net, a powerful segmentation model, identifies and delineates microplastic particles within the generated hyperspectral images. This two-stage process provides a robust solution for automated microplastic analysis.
+
 ## Project Tree
 
 ## Setup and Installation
